@@ -35,9 +35,27 @@ jobs:
           AUTH_TEST_CODE: 12345
         run: pytest -q
 
+  resolve-deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_enabled: ${{ steps.flags.outputs.deploy_enabled }}
+    steps:
+      - name: Resolve deploy config
+        id: flags
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -n "$DEPLOY_HOST" ] && [ -n "$DEPLOY_SSH_KEY" ]; then
+            echo "deploy_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy_enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
   deploy:
-    needs: backend-tests
-    if: ${{ vars.DEPLOY_HOST != '' && secrets.DEPLOY_SSH_KEY != '' }}
+    needs: [backend-tests, resolve-deploy]
+    if: ${{ needs.resolve-deploy.outputs.deploy_enabled == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Configure SSH

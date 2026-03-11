@@ -47,6 +47,36 @@ jobs:
           echo "build_name=$BUILD_NAME" >> "$GITHUB_OUTPUT"
           echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
 
+  resolve-config:
+    runs-on: ubuntu-latest
+    outputs:
+      android_signing_enabled: ${{ steps.flags.outputs.android_signing_enabled }}
+      publish_to_server_enabled: ${{ steps.flags.outputs.publish_to_server_enabled }}
+    steps:
+      - name: Resolve optional release config
+        id: flags
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          RELEASES_BASE_URL: ${{ vars.RELEASES_BASE_URL }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ]; then
+            echo "android_signing_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "android_signing_enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -n "$DEPLOY_HOST" ] && [ -n "$RELEASES_BASE_URL" ] && [ -n "$DEPLOY_SSH_KEY" ]; then
+            echo "publish_to_server_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish_to_server_enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
   backend-tests:
     needs: resolve-version
     runs-on: ubuntu-latest
@@ -71,7 +101,7 @@ jobs:
         run: pytest -q
 
   android-release:
-    needs: resolve-version
+    needs: [resolve-version, resolve-config]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -96,15 +126,20 @@ jobs:
         run: flutter pub get
 
       - name: Configure Android signing
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.ANDROID_KEY_ALIAS != '' && secrets.ANDROID_KEY_PASSWORD != '' && secrets.ANDROID_KEYSTORE_PASSWORD != '' }}
+        if: ${{ needs.resolve-config.outputs.android_signing_enabled == 'true' }}
         shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          printf '%s' "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/upload-keystore.jks
-          cat > android/key.properties <<'EOF'
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/upload-keystore.jks
+          cat > android/key.properties <<EOF
           storeFile=upload-keystore.jks
-          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
-          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyPassword=$ANDROID_KEY_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
           EOF
 
       - name: Build Android APK
@@ -187,8 +222,8 @@ jobs:
             release-assets/windows/omsg_windows_${{ needs.resolve-version.outputs.safe_version }}.zip
 
   publish-to-server:
-    needs: [resolve-version, android-release, windows-release, github-release]
-    if: ${{ vars.DEPLOY_HOST != '' && vars.RELEASES_BASE_URL != '' && secrets.DEPLOY_SSH_KEY != '' }}
+    needs: [resolve-version, resolve-config, android-release, windows-release, github-release]
+    if: ${{ needs.resolve-config.outputs.publish_to_server_enabled == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download Android artifact
