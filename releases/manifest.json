@@ -1,0 +1,46 @@
+{
+  "generated_at": "2026-03-09T00:00:00Z",
+  "channels": {
+    "stable": {
+      "windows": {
+        "latest_version": "1.0.0+1",
+        "minimum_supported_version": "1.0.0+1",
+        "mandatory": false,
+        "download_url": "https://volds.ru/files/omsg/windows/1.0.0+1/omsg_windows_1.0.0_1.zip",
+        "notes": "Initial Windows release.",
+        "package_kind": "zip",
+        "install_strategy": "replace_and_restart",
+        "in_app_download_supported": true,
+        "restart_required": true,
+        "file_size_bytes": null,
+        "sha256": null
+      },
+      "android": {
+        "latest_version": "1.0.0+1",
+        "minimum_supported_version": "1.0.0+1",
+        "mandatory": false,
+        "download_url": "https://volds.ru/files/omsg/android/1.0.0+1/app-release.apk",
+        "notes": "Initial Android release.",
+        "package_kind": "apk",
+        "install_strategy": "open_package",
+        "in_app_download_supported": true,
+        "restart_required": true,
+        "file_size_bytes": null,
+        "sha256": null
+      },
+      "web": {
+        "latest_version": "1.0.0+1",
+        "minimum_supported_version": "1.0.0+1",
+        "mandatory": false,
+        "download_url": "https://volds.ru/files/omsg/web/1.0.0+1/",
+        "notes": "Initial Web release.",
+        "package_kind": "bundle",
+        "install_strategy": "deploy_hosting",
+        "in_app_download_supported": false,
+        "restart_required": false,
+        "file_size_bytes": null,
+        "sha256": null
+      }
+    }
+  }
+}

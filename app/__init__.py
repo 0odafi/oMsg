@@ -1,0 +1,1 @@
+"""oMsg application package."""

@@ -1,0 +1,289 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version in format 1.2.3+4'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  OMSG_API_BASE_URL: ${{ vars.OMSG_API_BASE_URL != '' && vars.OMSG_API_BASE_URL || 'https://example.com' }}
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      safe_version: ${{ steps.version.outputs.safe_value }}
+      build_name: ${{ steps.version.outputs.build_name }}
+      build_number: ${{ steps.version.outputs.build_number }}
+    steps:
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\+[0-9]+$'; then
+            echo "Invalid version: $VERSION" >&2
+            exit 1
+          fi
+          SAFE_VERSION="${VERSION//+/_}"
+          BUILD_NAME="${VERSION%%+*}"
+          BUILD_NUMBER="${VERSION##*+}"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "safe_value=$SAFE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_name=$BUILD_NAME" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+
+  backend-tests:
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run backend tests
+        env:
+          SMS_PROVIDER: test
+          AUTH_TEST_CODE: 12345
+        run: pytest -q
+
+  android-release:
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: omsg_app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Configure Android signing
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.ANDROID_KEY_ALIAS != '' && secrets.ANDROID_KEY_PASSWORD != '' && secrets.ANDROID_KEYSTORE_PASSWORD != '' }}
+        shell: bash
+        run: |
+          printf '%s' "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/upload-keystore.jks
+          cat > android/key.properties <<'EOF'
+          storeFile=upload-keystore.jks
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          EOF
+
+      - name: Build Android APK
+        run: |
+          flutter build apk --release \
+            --build-name="${{ needs.resolve-version.outputs.build_name }}" \
+            --build-number="${{ needs.resolve-version.outputs.build_number }}" \
+            --dart-define=OMSG_API_BASE_URL="${{ env.OMSG_API_BASE_URL }}"
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omsg-android-${{ needs.resolve-version.outputs.safe_version }}
+          path: omsg_app/build/app/outputs/flutter-apk/app-release.apk
+
+  windows-release:
+    needs: resolve-version
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: omsg_app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build Windows client
+        shell: pwsh
+        run: |
+          flutter build windows --release `
+            --build-name='${{ needs.resolve-version.outputs.build_name }}' `
+            --build-number='${{ needs.resolve-version.outputs.build_number }}' `
+            --dart-define=OMSG_API_BASE_URL='${{ env.OMSG_API_BASE_URL }}'
+
+      - name: Pack Windows client
+        shell: pwsh
+        run: |
+          $safeVersion = '${{ needs.resolve-version.outputs.safe_version }}'
+          $archive = "..\\dist\\omsg_windows_$safeVersion.zip"
+          New-Item -ItemType Directory -Force -Path ..\\dist | Out-Null
+          Compress-Archive -Path build\\windows\\x64\\runner\\Release\\* -DestinationPath $archive -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omsg-windows-${{ needs.resolve-version.outputs.safe_version }}
+          path: dist/omsg_windows_${{ needs.resolve-version.outputs.safe_version }}.zip
+
+  github-release:
+    needs: [resolve-version, backend-tests, android-release, windows-release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: omsg-android-${{ needs.resolve-version.outputs.safe_version }}
+          path: release-assets/android
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: omsg-windows-${{ needs.resolve-version.outputs.safe_version }}
+          path: release-assets/windows
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.resolve-version.outputs.version }}
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/android/app-release.apk
+            release-assets/windows/omsg_windows_${{ needs.resolve-version.outputs.safe_version }}.zip
+
+  publish-to-server:
+    needs: [resolve-version, android-release, windows-release, github-release]
+    if: ${{ vars.DEPLOY_HOST != '' && vars.RELEASES_BASE_URL != '' && secrets.DEPLOY_SSH_KEY != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: omsg-android-${{ needs.resolve-version.outputs.safe_version }}
+          path: release-assets/android
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: omsg-windows-${{ needs.resolve-version.outputs.safe_version }}
+          path: release-assets/windows
+
+      - name: Collect artifact metadata
+        id: artifacts
+        shell: bash
+        env:
+          RELEASES_BASE_URL: ${{ vars.RELEASES_BASE_URL }}
+        run: |
+          SAFE_VERSION="${{ needs.resolve-version.outputs.safe_version }}"
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          BASE_URL="${RELEASES_BASE_URL%/}"
+          ANDROID_FILE="release-assets/android/app-release.apk"
+          WINDOWS_FILE="release-assets/windows/omsg_windows_${SAFE_VERSION}.zip"
+          echo "android_size=$(stat -c%s "$ANDROID_FILE")" >> "$GITHUB_OUTPUT"
+          echo "android_sha=$(sha256sum "$ANDROID_FILE" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "windows_size=$(stat -c%s "$WINDOWS_FILE")" >> "$GITHUB_OUTPUT"
+          echo "windows_sha=$(sha256sum "$WINDOWS_FILE" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "android_url=${BASE_URL}/omsg/android/${VERSION}/app-release.apk" >> "$GITHUB_OUTPUT"
+          echo "windows_url=${BASE_URL}/omsg/windows/${VERSION}/omsg_windows_${SAFE_VERSION}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          : "${DEPLOY_PORT:=22}"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if printf '%s' "$DEPLOY_SSH_KEY" | grep -q 'BEGIN .* PRIVATE KEY'; then
+            printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/omsg_deploy
+          else
+            printf '%s' "$DEPLOY_SSH_KEY" | base64 -d > ~/.ssh/omsg_deploy
+          fi
+          chmod 600 ~/.ssh/omsg_deploy
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload release assets to server
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        run: |
+          : "${DEPLOY_PORT:=22}"
+          : "${DEPLOY_USER:=root}"
+          : "${DEPLOY_PATH:=/opt/omsg}"
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          SAFE_VERSION="${{ needs.resolve-version.outputs.safe_version }}"
+          ANDROID_REMOTE_DIR="${DEPLOY_PATH}/releases/omsg/android/${VERSION}"
+          WINDOWS_REMOTE_DIR="${DEPLOY_PATH}/releases/omsg/windows/${VERSION}"
+          ssh -i ~/.ssh/omsg_deploy -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '${ANDROID_REMOTE_DIR}' '${WINDOWS_REMOTE_DIR}'"
+          scp -i ~/.ssh/omsg_deploy -P "$DEPLOY_PORT" release-assets/android/app-release.apk "$DEPLOY_USER@$DEPLOY_HOST:${ANDROID_REMOTE_DIR}/app-release.apk"
+          scp -i ~/.ssh/omsg_deploy -P "$DEPLOY_PORT" "release-assets/windows/omsg_windows_${SAFE_VERSION}.zip" "$DEPLOY_USER@$DEPLOY_HOST:${WINDOWS_REMOTE_DIR}/omsg_windows_${SAFE_VERSION}.zip"
+
+      - name: Update release manifest on server
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        run: |
+          : "${DEPLOY_PORT:=22}"
+          : "${DEPLOY_USER:=root}"
+          : "${DEPLOY_PATH:=/opt/omsg}"
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          ssh -i ~/.ssh/omsg_deploy -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "\
+            python3 '${DEPLOY_PATH}/scripts/update_manifest.py' \
+              --manifest '${DEPLOY_PATH}/releases/manifest.json' \
+              --platform android \
+              --version '${VERSION}' \
+              --download-url '${{ steps.artifacts.outputs.android_url }}' \
+              --notes 'GitHub Release v${VERSION}' \
+              --file-size-bytes '${{ steps.artifacts.outputs.android_size }}' \
+              --sha256 '${{ steps.artifacts.outputs.android_sha }}' && \
+            python3 '${DEPLOY_PATH}/scripts/update_manifest.py' \
+              --manifest '${DEPLOY_PATH}/releases/manifest.json' \
+              --platform windows \
+              --version '${VERSION}' \
+              --download-url '${{ steps.artifacts.outputs.windows_url }}' \
+              --notes 'GitHub Release v${VERSION}' \
+              --file-size-bytes '${{ steps.artifacts.outputs.windows_size }}' \
+              --sha256 '${{ steps.artifacts.outputs.windows_sha }}'"

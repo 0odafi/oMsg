@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.db
+media
+releases
+omsg_app/build
+omsg_app/.dart_tool
+omsg_app/.flutter-plugins
+omsg_app/.flutter-plugins-dependencies
+omsg_app/.packages
